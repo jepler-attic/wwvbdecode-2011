@@ -20,6 +20,7 @@ struct wwvb_t {
 
 extern void set_time(const wwvb_t &t);
 extern void next_second();
+extern void set_divisor(uint32_t divisor);
 
 namespace {
 int8_t isly(int8_t year) {
@@ -262,28 +263,81 @@ bool try_set_time(wwvb_t &new_t) {
     return false;
 }
 
-#ifdef TUNE
-/* TIMER1 runs at 16MHz nominal.  We want a 1ms interrupt.
+uint32_t daysec(wwvb_t &t)
+{
+    return t.hour * (uint32_t)3600 + t.minute * 60 + t.second;
+}
+
+// Accurate timing through PWM dithering:
+// We want a nominal 1ms interrupt  for calls to wwvb_receive_loop.  Suppose
+// the clocksource is nominally 16MHz.  This means we want a TOP value of 16000
+// If the clocksource is 16.001MHz, then we want a TOP value of 16001, and so on
+// for each .001MHz multiple of clock speed.  If the clocksource is somewhere in
+// between, then the desired rate is not an integer.
+//
+// To give a long-term interval closer to the true interval, a fixed-point
+// approximation to the divisor is made, with a fixed denominator of 32768.
+// With integer math, we can compute the top value that is numerically less than
+// or equal to the desired divisor:
+//     top_l = divisor >> 15;
+// and the fraction by which the true divisor exceeds it:
+//     num = divisor & 0x7fff;
+//
+// Now, if num cycles have length (top_l+1) and 32768-num cycles have length
+// top+l, the total time for 32768 cycles is top_l*32768 + num, which is equal
+// to divisor.  Therefore, we have achieved our exact desired rate over a
+// timescale of 32.768 seconds.  Because the longer and shorter cycles are
+// equally distributed, the rate is actually within 1 clock of the desired rate
+// at all times.  The jitter resulting from the dither is 1 clock, or 200ns at
+// 5MHz.
+#ifdef OXCO
+// The oven-compensated crystal oscillator runs at 10MHz but is divided
+// by two before being presented on the T1 pin.  Accuracy, in principle: <<1ppm
+const uint32_t NOMINAL_RATE=5000*32768;
+#else
+// The AVR's native clock rate is 16MHz.  Accuracy, in principle: <100ppm
+const uint32_t NOMINAL_RATE=16000*32768;
+#endif
+uint32_t divisor=NOMINAL_RATE;
+int32_t ticks, last_steer_ticks;
+wwvb_t last_steer_time = {999, };
+
+/* TIMER1 runs at 16MHz nominal.  We want a 1ms interrupt.  
  * That makes the nominal TOP value 16000.  This wide adjustment range allows
  * us to accomodate real clock frequencies of 15MHz..16MHz.  The expected clock
  * variations are actually on the order of ppm, not 6%.
  */
-extern void set_timer_top(uint16_t top);
-const int16_t MIN_TOP=15000, MAX_TOP=17000, NOMINAL_TOP=16000;
-int16_t top = NOMINAL_TOP;
-static uint8_t counter_history;
-void steer_counter(uint16_t pulse_period_measured) {
-    counter_history <<= 2;
-    if(measured < 1000) counter_history |= 1;
-    else if(measured > 1000) counter_history |= 2;
-    if(counter_history == 0x55 && top > min_top)
-        top--; /* Last 4 samples were all too short */
-    else if(counter_history == 0x88 && top < max_top)
-        top++; /* Last 4 samples were all too long */
-    set_timer_top(top);
+
+void steer_timer(wwvb_t &pending_time)
+{
+    // Don't steer based on samples from within the same day
+    // .. or samples more than one day apart
+    if(pending_time.yday != last_steer_time.yday + 1) goto out;
+    if(pending_time.year != last_steer_time.year) goto out;
+
+    // Don't steer if a leap second might have interfered
+    if(pending_time.ls != last_steer_time.ls) return;
+
+    {
+    uint32_t real_elapsed = 1000 * (daysec(pending_time) + 86400 - daysec(last_steer_time));
+
+    // Don't steer if it's less than 22 hours
+    if(real_elapsed < (22 * 60 * 60 * 1000)) return;
+
+    uint32_t counted_elapsed = ticks - last_steer_ticks;
+
+    printf("divisor was %f[%d]\n", divisor / 32768., divisor);
+    divisor = (uint64_t)divisor * counted_elapsed / real_elapsed;
+    set_divisor(divisor);
+    printf("real_elapsed=%d counted_elapsed=%d steered to %f[%d]\n", real_elapsed, counted_elapsed, divisor / 32768., divisor);
+    }
+
+out:
+    last_steer_time = pending_time;
+    last_steer_ticks = ticks;
+
 }
 
-#endif
 
 bool pending_set_time;
 bool pps_good;
@@ -344,6 +398,7 @@ printf("wwvb_receive_loop %c %4d %d %8d\n",
             }
             if(pending_set_time) {
                 set_time(pending_time);
+		steer_timer(pending_time);
                 pending_set_time = false;
                 free_running_ms = 1000 + SIGNAL_DELAY;
             }
@@ -369,9 +424,6 @@ printf("wwvb_receive_loop %c %4d %d %8d\n",
 
     if(rising_edge) {
         pps_good = counter_near(1000);
-#ifdef TUNE
-        if(pps_good && counter != 1000) steer_counter(pps_good > 1000);
-#endif
         counter = 0;
     } else if(counter > 1000 + COUNTER_SLOP) {
         pps_good = false;
@@ -405,9 +457,21 @@ void set_time(const wwvb_t &t) {
     exit(0);
 }
 
+void set_divisor(uint32_t div) {}
+
 void next_second() {}
 
 int main() {
+    wwvb_t t0 = { 1, 1, 30, 0, 0, 0, 0, 0 },
+	   t1 = { 2, 1, 30, 0, 0, 0, 0, 0 },
+	   t2 = { 3, 1, 30, 0, 0, 0, 0, 0 };
+    ticks = 0;
+    steer_timer(t0);
+    ticks = 86401234;
+    steer_timer(t1);
+    ticks += 86400001;
+    steer_timer(t2);
+
     while(1) {
         int c = getchar();
         if(c == EOF) break;
