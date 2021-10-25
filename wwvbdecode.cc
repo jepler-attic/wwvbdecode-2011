@@ -250,10 +250,10 @@ bool try_set_time(wwvb_t &new_t) {
     decode_one_minute(0, t0);
     decode_one_minute(60, t1);
 
-printf("first minute  %s\n", format_wwvbtime(t0));
-printf("second minute %s\n", format_wwvbtime(t1));
+//printf("first minute  %s\n", format_wwvbtime(t0));
+//printf("second minute %s\n", format_wwvbtime(t1));
     advance_minute(t0);
-printf("advanced      %s\n", format_wwvbtime(t0));
+//printf("advanced      %s\n", format_wwvbtime(t0));
     if(t0 == t1) {
         t1.second = 59;
         new_t = t1;
@@ -300,20 +300,46 @@ void wwvb_receive_loop(bool raw_wwvb) {
     bool rising_edge = edge && wwvb;
     bool falling_edge = edge && !wwvb;
 
+    free_running_ms ++;
+    if(free_running_ms >= 1000) {
+        free_running_ms -= 1000;
+        next_second();
+    }
+
+printf("wwvb_receive_loop %c %4d %d %8d\n",
+        "_~-+"[wwvb + 2*edge], counter, wwvb_polarity, free_running_ms);
     switch(wwvb_state) {
     case STATE_FIND_POLARITY:
         if(rising_edge) {
-            if(counter_near(1000)) {
+            if(sos_counter == 0) {
+                printf(
+                    "rising edge with sos_counter = 0: reset counter %d->0\n",
+                    counter);
+                counter = 0;
+                sos_counter ++;
+            } else if(counter_near(1000)) {
                 sos_counter++;
-                if(sos_counter == 5) {
+                printf(
+                    "good rising edge counter=%d sos_counter->%d\n",
+                    counter, sos_counter);
+                if(sos_counter == 10) {
                     goto set_state_capture_time;
                 }
-            } else { sos_counter = 0; wwvb_polarity = !wwvb_polarity; }
+            } else {
+                printf(
+                    "bad rising edge counter=%d polarity->%d\n",
+                    counter, !wwvb_polarity);
+                sos_counter = 0; wwvb_polarity = !wwvb_polarity;
+            }
         }
+        break;
 
     case STATE_CAPTURE_TIME:
         if(rising_edge) {
             if(!counter_near(1000)) {
+                printf(
+                    "bad rising edge counter=%d -> find_polarity",
+                    counter);
                 goto set_state_find_polarity;
             }
             if(pending_set_time) {
@@ -321,6 +347,9 @@ void wwvb_receive_loop(bool raw_wwvb) {
                 pending_set_time = false;
                 free_running_ms = 1000 + SIGNAL_DELAY;
             }
+            static uint8_t seconds_unset;
+            seconds_unset ++;
+            if(seconds_unset == 0) goto set_state_find_polarity;
         }
         if(falling_edge) {
             if(counter_near(200)) WWVB_PUT(0);
@@ -328,19 +357,14 @@ void wwvb_receive_loop(bool raw_wwvb) {
             else if(counter_near(800)) {
                 WWVB_PUT(2);
                 pending_set_time = try_set_time(pending_time);
-            } else
+            } else {
+                printf(
+                    "bad falling edge counter=%d -> find_polarity",
+                    counter);
                 goto set_state_find_polarity;
+            }
         }
-        static uint8_t seconds_unset;
-        seconds_unset ++;
-        if(seconds_unset == 0) goto set_state_find_polarity;
 
-    }
-
-    free_running_ms ++;
-    if(free_running_ms >= 1000) {
-        free_running_ms -= 1000;
-        next_second();
     }
 
     if(rising_edge) {
@@ -358,12 +382,14 @@ void wwvb_receive_loop(bool raw_wwvb) {
     return;
 
 set_state_capture_time:
+printf("->capture time\n");
     counter = 0;
     memset(wwvb_buf, 0, sizeof(wwvb_buf));
     wwvb_state = STATE_CAPTURE_TIME;
     return;
 
 set_state_find_polarity:
+printf("->find_polarity\n");
     sos_counter = 0;
     wwvb_state = STATE_FIND_POLARITY;
     return;
