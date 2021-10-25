@@ -385,4 +385,103 @@ int main() {
     }
     printf("failed to set time\n");
 }
+#else
+#include <stdio.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/eeprom.h>
+
+#define LED (5)
+#define WWVB (0)
+
+#define CYCLES_HIGH 16000
+
+int uptime;
+
+char buf[80];
+void set_time(const wwvb_t &t) {
+    snprintf(buf, sizeof(buf),
+        "set time %d/%03d %d:%02d:%02d ly=%d ls=%d dst=%d uptime=%d pol=%d\n",
+        t.year + 2000, t.yday, t.hour, t.minute, t.second, t.ls, t.ly, t.dst,
+        uptime, wwvb_polarity);
+    eeprom_write_block(buf, 0, strlen(buf)+1);
+
+    // set LED on solid
+    PORTB |= (1<<LED);
+
+    // and freeze here
+    while(1) {}
+}
+
+ISR(TIMER1_CAPT_vect) {
+    bool wwvb_raw = !!(PINB & (1<<WWVB));
+    wwvb_receive_loop(wwvb_raw);
+
+    int val;
+
+    if(wwvb_state == STATE_FIND_POLARITY) {
+        val = pps_good;
+    } else {
+        val = (wwvb_denoised ^ wwvb_polarity ) ? 1 : 16;
+    }
+    if((free_running_ms & 15) < val)
+        PORTB |= (1<<LED);
+    else
+        PORTB &= ~(1<<LED);
+}
+
+void eeprom_to_serial() {
+    uint8_t *i = 0;
+    uint8_t c;
+    while(i < (uint8_t*)256 && (c = eeprom_read_byte(i++))) {
+        while(!(UCSR0A & (1<<UDRE0)))
+            {}
+        UDR0 = c;
+    }
+}
+
+void next_second() {
+    uptime++;
+}
+
+void main() {
+    // Set up TIMER1 in CTC mode with ICR1 as top
+    TCCR1A = (1<WGM11);
+    TCCR1B = (1<<WGM13) | (1<<WGM12) | (1<<CS10);
+    ICR1 = CYCLES_HIGH;
+    TIMSK1 = (1<<ICIE1);
+
+    // Set the UART to 19.2kb/s.
+    #define F_CPU 16000000
+    #define BAUD 19200
+    #include <util/setbaud.h>
+    UBRR0H = UBRRH_VALUE;
+    UBRR0L = UBRRL_VALUE;
+    #if USE_2X
+    UCSR0A |= (1 << U2X0);
+    #else
+    UCSR0A &= ~(1 << U2X0);
+    #endif
+    DDRD = (1<<1); // enable TXD as output
+
+    // Set up the LED as output
+    DDRB = (1<<LED);
+
+    PORTB |= (1<<WWVB); // turn on pull-up on wwvb
+
+    // enable interrupts
+    sei();
+
+    // perhaps our predecessor left a message
+    eeprom_to_serial();
+
+    // and sleep forever, since things happen in the interrupt only
+#ifdef SLEEP_MODE_IDLE
+    set_sleep_mode(SLEEP_MODE_IDLE);
+    while(1) sleep_mode();
+#else
+    while(1) {}
+#endif
+
+}
 #endif
