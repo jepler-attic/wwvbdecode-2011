@@ -7,6 +7,34 @@
 #define printf(...) (0)
 #endif
 
+/* Timezone setting
+ *
+ * If you are not in US/Central timezone, you'll have to modify this.
+ *
+ * standard and dst give the offsets during standard and dst times,
+ * respectively.
+ *
+ * apply_standard and apply_dst give the UTC minute of the day to start standard
+ * or dst time.
+ *
+ * You can use the unix 'zdump' program to see these values for your timezone:
+ * $ zdump -v -c 2010,2011 US/Central
+ * ...
+ * US/Central  Sun Mar 14 08:00:00 2010 UTC = Sun Mar 14 03:00:00 2010 CDT isdst=1 gmtoff=-18000
+ * US/Central  Sun Nov  7 07:00:00 2010 UTC = Sun Nov  7 01:00:00 2010 CST isdst=0 gmtoff=-21600
+ * ..
+ * From the gmtoff values in seconds, you can determine the hours and minutes of
+ * offset for standard and dst.  If the minute offset is nonzero and the hour
+ * offset is negative, then the minute offset should be negative too. (e.g.,
+ * subtract 6 hours and then subtract 30 minutes).
+ *
+ * From the UTC transition times, you can directly read the values for
+ * apply_standard and apply_dst.
+ */
+struct tzoffset { int8_t hour, minute; };
+const tzoffset standard = { -6, 0 }, apply_standard = { 7, 0 };
+const tzoffset dst = { -5, 0 }, apply_dst = {8, 0};
+
 struct wwvb_t {
     int16_t yday;  // 1..365, or 1..366 in leap years
     int8_t hour;   // 0..23
@@ -91,7 +119,7 @@ void advance_second(wwvb_t &t) {
 // in minutes and seconds.  Note: for negative non-hour offsets, h and m
 // should both be negative.  e.g., for instance the NST offset of -3:30
 // would be passed as h=-3, m=-30
-void apply_tz(wwvb_t &t, int8_t h, int8_t m) {
+void offset_tz(wwvb_t &t, int8_t h, int8_t m) {
     t.minute += m;
     t.hour += h;
     // Now, both hours and minutes can be outside their normal range
@@ -127,6 +155,29 @@ void apply_tz(wwvb_t &t, int8_t h, int8_t m) {
     }
 
     // Now
+}
+
+bool isdst(wwvb_t &t)
+{
+    switch(t.dst)
+    {
+	case 0: return false;
+	case 3: return true;
+	case 2: // dst begins today
+		if(t.hour > apply_dst.hour) return true;
+		if(t.hour < apply_dst.hour) return false;
+		return t.minute >= apply_dst.minute;
+	case 1: // dst ends today
+		if(t.hour > apply_standard.hour) return false;
+		if(t.hour < apply_standard.hour) return true;
+		return t.minute < apply_standard.minute;
+    }
+}
+
+void apply_tz(wwvb_t &t)
+{
+    if(isdst(t)) offset_tz(t, dst.hour, dst.minute);
+    else offset_tz(t, standard.hour, standard.minute);
 }
 
 int8_t leapyears_before(int8_t year) {
@@ -434,14 +485,12 @@ printf("wwvb_receive_loop %c %4d %d %8d\n",
     return;
 
 set_state_capture_time:
-printf("->capture time\n");
     counter = 0;
     memset(wwvb_buf, 0, sizeof(wwvb_buf));
     wwvb_state = STATE_CAPTURE_TIME;
     return;
 
 set_state_find_polarity:
-printf("->find_polarity\n");
     sos_counter = 0;
     wwvb_state = STATE_FIND_POLARITY;
     return;
@@ -451,33 +500,40 @@ printf("->find_polarity\n");
 #include <stdio.h>
 #include <stdlib.h>
 
+bool time_valid;
+wwvb_t now;
+
 void set_time(const wwvb_t &t) {
-    printf("set time %d/%03d %d:%02d:%02d ly=%d ls=%d dst=%d\n",
+    if(time_valid) return;
+    printf("set time %d/%03d %2d:%02d:%02d ly=%d ls=%d dst=%d\n",
         t.year + 2000, t.yday, t.hour, t.minute, t.second, t.ls, t.ly, t.dst);
-    exit(0);
+    now = t;
+    time_valid = true;
 }
 
 void set_divisor(uint32_t div) {}
 
-void next_second() {}
+void next_second() {
+    if(!time_valid) return;
+    advance_second(now);
+    if(now.second == 0 || now.second >= 59)
+    {
+	wwvb_t t = now;
+	printf("%d/%03d %2d:%02d:%02d.%04d ly=%d ls=%d dst=%d  ",
+	    t.year + 2000, t.yday, t.hour, t.minute, t.second, free_running_ms, t.ls, t.ly, t.dst);
+	apply_tz(t);
+	printf("%d/%03d %2d:%02d:%02d.%04d C%cT\n",
+	    t.year + 2000, t.yday, t.hour, t.minute, t.second, free_running_ms, isdst(now) ? 'D' : 'S');
+    }
+}
 
 int main() {
-    wwvb_t t0 = { 1, 1, 30, 0, 0, 0, 0, 0 },
-	   t1 = { 2, 1, 30, 0, 0, 0, 0, 0 },
-	   t2 = { 3, 1, 30, 0, 0, 0, 0, 0 };
-    ticks = 0;
-    steer_timer(t0);
-    ticks = 86401234;
-    steer_timer(t1);
-    ticks += 86400001;
-    steer_timer(t2);
-
     while(1) {
         int c = getchar();
         if(c == EOF) break;
         wwvb_receive_loop(c == '1');
     }
-    printf("failed to set time\n");
+    if(!time_valid) printf("failed to set time\n");
 }
 #else
 #include <stdio.h>
