@@ -3,6 +3,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef AVR
+#define printf(...) (0)
+#endif
+
 struct wwvb_t {
     int16_t yday;  // 1..365, or 1..366 in leap years
     int8_t hour;   // 0..23
