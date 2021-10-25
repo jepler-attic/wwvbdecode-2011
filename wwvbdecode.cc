@@ -563,8 +563,11 @@ void set_time(const wwvb_t &t) {
     while(1) {}
 }
 
+uint16_t accum, num, top_lo;
+
 ISR(TIMER1_CAPT_vect) {
-    bool wwvb_raw = !!(PINB & (1<<WWVB));
+    bool wwvb_raw = !!(PINB & (1<<WWVB)); // capture this first so that we have the least jitter possible
+
     wwvb_receive_loop(wwvb_raw);
 
     int val;
@@ -578,6 +581,14 @@ ISR(TIMER1_CAPT_vect) {
         PORTB |= (1<<LED);
     else
         PORTB &= ~(1<<LED);
+
+    accum += num;
+    if(accum & 0x8000)
+    {
+	accum -= 0x8000;
+	ICR1 = top_lo + 1;
+    } else
+	ICR1 = top_lo;
 }
 
 void eeprom_to_serial() {
@@ -594,12 +605,24 @@ void next_second() {
     uptime++;
 }
 
+void set_divisor(uint32_t nominal_rate)
+{
+    top_lo = nominal_rate >> 15;
+    num = nominal_rate & 0x7fff;
+}
+
 void main() {
     // Set up TIMER1 in CTC mode with ICR1 as top
     TCCR1A = (1<WGM11);
-    TCCR1B = (1<<WGM13) | (1<<WGM12) | (1<<CS10);
-    ICR1 = CYCLES_HIGH;
     TIMSK1 = (1<<ICIE1);
+    TCCR1B = (1<<WGM13) | (1<<WGM12)
+#ifdef OXCO // Clock on falling edge of T1
+	| (1<<CS12) | (1<<CS11)
+#else       // Clock on CLKio
+	| (1<<CS10);
+#endif
+    TCCR1B = (1<<WGM13) | (1<<WGM12) | (1<<CS10);
+    set_divisor(NOMINAL_RATE);
 
     // Set the UART to 19.2kb/s.
     #define F_CPU 16000000
