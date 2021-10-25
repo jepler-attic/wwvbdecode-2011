@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2011 Jeff Epler
+#
+# SPDX-License-Identifier: GPL-3.0-only
+
 CXX := g++
 CFLAGS := -Os -g -Wall
 
