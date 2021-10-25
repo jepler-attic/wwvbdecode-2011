@@ -23,6 +23,10 @@
 #define printf(...) (0)
 #endif
 
+/// The rate (in HZ) at which wwvb_receive_loop is called
+#define POLLING_RATE 1000
+#define ms2jiffies(m) (m*1000lu/POLLING_RATE)
+
 /* Timezone setting
  *
  * If you are not in US/Central timezone, you'll have to modify this.
@@ -219,10 +223,10 @@ bool operator==(const wwvb_t &a, const wwvb_t &b) {
 }
 
 const uint8_t NSAMPLES = 120;
-const int8_t DEBOUNCE_TC = 10;
-const int16_t COUNTER_SLOP = 100;
-const int16_t RECEIVER_DELAY = 40;
-const int16_t LIGHT_DELAY = 5;
+const int16_t COUNTER_SLOP = POLLING_RATE/10;
+const int8_t DEBOUNCE_TC = (1+COUNTER_SLOP/10);
+const int16_t RECEIVER_DELAY = ms2jiffies(40);
+const int16_t LIGHT_DELAY = ms2jiffies(5);
 const int16_t SIGNAL_DELAY = RECEIVER_DELAY + 2*DEBOUNCE_TC + LIGHT_DELAY;
 uint8_t wwvb_buf[(NSAMPLES+3)/4];
 int8_t wwvb_pos;
@@ -387,10 +391,10 @@ void steer_timer(wwvb_t &pending_time)
     if(pending_time.ls != last_steer_time.ls) return;
 
     {
-    uint32_t real_elapsed = 1000 * (daysec(pending_time) + 86400 - daysec(last_steer_time));
+    uint32_t real_elapsed = POLLING_RATE * (daysec(pending_time) + 86400 - daysec(last_steer_time));
 
     // Don't steer if it's less than 22 hours
-    if(real_elapsed < (UINT32_C(22) * 60 * 60 * 1000)) return;
+    if(real_elapsed < (UINT32_C(22) * 60 * 60 * POLLING_RATE)) return;
 
     uint32_t counted_elapsed = ticks - last_steer_ticks;
 
@@ -410,8 +414,12 @@ out:
 bool pending_set_time;
 bool pps_good;
 wwvb_t pending_time;
-int16_t free_running_ms;
+int16_t free_running_jiffies;
 }
+
+#define ZERO_TIME (POLLING_RATE*2/10)
+#define ONE_TIME  (POLLING_RATE*5/10)
+#define MARK_TIME (POLLING_RATE*8/10)
 
 void wwvb_receive_loop(bool raw_wwvb) {
     bool old_wwvb_denoised = wwvb_denoised;
@@ -422,9 +430,9 @@ void wwvb_receive_loop(bool raw_wwvb) {
     bool rising_edge = edge && wwvb;
     bool falling_edge = edge && !wwvb;
 
-    free_running_ms ++;
-    if(free_running_ms >= 1000) {
-        free_running_ms -= 1000;
+    free_running_jiffies ++;
+    if(free_running_jiffies >= POLLING_RATE) {
+        free_running_jiffies -= POLLING_RATE;
         next_second();
     }
 
@@ -434,7 +442,7 @@ void wwvb_receive_loop(bool raw_wwvb) {
             if(sos_counter == 0) {
                 counter = 0;
                 sos_counter ++;
-            } else if(counter_near(1000)) {
+            } else if(counter_near(POLLING_RATE)) {
                 sos_counter++;
                 if(sos_counter == 10) {
                     goto set_state_capture_time;
@@ -447,23 +455,23 @@ void wwvb_receive_loop(bool raw_wwvb) {
 
     case STATE_CAPTURE_TIME:
         if(rising_edge) {
-            if(!counter_near(1000)) {
+            if(!counter_near(POLLING_RATE)) {
                 goto set_state_find_polarity;
             }
             if(pending_set_time) {
                 set_time(pending_time);
 		steer_timer(pending_time);
                 pending_set_time = false;
-                free_running_ms = 1000 + SIGNAL_DELAY;
+                free_running_jiffies = POLLING_RATE + SIGNAL_DELAY;
             }
             static uint8_t seconds_unset;
             seconds_unset ++;
             if(seconds_unset == 0) goto set_state_find_polarity;
         }
         if(falling_edge) {
-            if(counter_near(200)) WWVB_PUT(0);
-            else if(counter_near(500)) WWVB_PUT(1);
-            else if(counter_near(800)) {
+            if(counter_near(ZERO_TIME)) WWVB_PUT(0);
+            else if(counter_near(ONE_TIME)) WWVB_PUT(1);
+            else if(counter_near(MARK_TIME)) {
                 WWVB_PUT(2);
                 pending_set_time = try_set_time(pending_time);
             } else {
@@ -474,9 +482,9 @@ void wwvb_receive_loop(bool raw_wwvb) {
     }
 
     if(rising_edge) {
-        pps_good = counter_near(1000);
+        pps_good = counter_near(POLLING_RATE);
         counter = 0;
-    } else if(counter > 1000 + COUNTER_SLOP) {
+    } else if(counter > POLLING_RATE + COUNTER_SLOP) {
         pps_good = false;
         counter ++;
     } else
@@ -520,10 +528,10 @@ void next_second() {
     {
 	wwvb_t t = now;
 	printf("%d/%03d %2d:%02d:%02d.%04d ly=%d ls=%d dst=%d  ",
-	    t.year + 2000, t.yday, t.hour, t.minute, t.second, free_running_ms, t.ls, t.ly, t.dst);
+	    t.year + 2000, t.yday, t.hour, t.minute, t.second, free_running_jiffies, t.ls, t.ly, t.dst);
 	apply_tz(t);
 	printf("%d/%03d %2d:%02d:%02d.%04d C%cT\n",
-	    t.year + 2000, t.yday, t.hour, t.minute, t.second, free_running_ms, isdst(now) ? 'D' : 'S');
+	    t.year + 2000, t.yday, t.hour, t.minute, t.second, free_running_jiffies, isdst(now) ? 'D' : 'S');
     }
 }
 
@@ -577,7 +585,7 @@ ISR(TIMER1_CAPT_vect) {
     } else {
         val = (wwvb_denoised ^ wwvb_polarity ) ? 16 : 1;
     }
-    if((free_running_ms & 15) < val)
+    if((free_running_jiffies & 15) < val)
         PORTB |= (1<<LED);
     else
         PORTB &= ~(1<<LED);
