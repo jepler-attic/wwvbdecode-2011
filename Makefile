@@ -1,7 +1,9 @@
 CXX := g++
 CFLAGS := -Os -g -Wall
 
-MCU := atmega328
+avr-cc-option = $(shell if $(AVR-CC) $(AVR-CFLAGS) $(1) -S -o /dev/null -xc /dev/null \
+	> /dev/null 2>&1; then echo "$(1)"; else echo "$(2)"; fi ;)
+
 AMCU := m328p
 AVRDUDE := avrdude -p${AMCU} -c arduino -P /dev/ttyUSB0 -b57600
 
@@ -23,8 +25,9 @@ wwvbdecode: wwvbdecode.cc
 	$(CXX) $(CFLAGS) -o $@ $<
 
 AVR-CC := avr-gcc
+AVR-MCUFLAG := $(call avr-cc-option,-mmcu=atmega328,-mmcu=atmega168)
 AVR-CFLAGS := -ffreestanding -funit-at-a-time -finline-functions-called-once \
-	-fno-exceptions -fno-rtti -mmcu=${MCU} -O3 -g
+	-fno-exceptions -fno-rtti ${AVR-MCUFLAG} -O3 -g
 
 wwvb.elf: wwvbdecode.cc
 	$(AVR-CC) $(AVR-CFLAGS) -o $@ $<
