@@ -1,0 +1,388 @@
+#define __STDC_CONSTANT_MACROS 1
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+
+struct wwvb_t {
+    int16_t yday;  // 1..365, or 1..366 in leap years
+    int8_t hour;   // 0..23
+    int8_t minute; // 0..60
+    int8_t second; // 0..60
+    int8_t year;   // 0..99, indicating 2000..2099
+    unsigned ls:1; // true if a leap second is coming
+    unsigned ly:1; // true if it's a leap year, at least after feb 28
+    unsigned dst:2; // 2-bit dst indicator code
+};
+
+extern void set_time(const wwvb_t &t);
+extern void next_second();
+
+namespace {
+int8_t isly(int8_t year) {
+    return (year == 0 || year % 100) && ((year % 4) == 0);
+}
+
+int16_t last_yday(wwvb_t &t) {
+    return 365 + isly(t.year);
+}
+
+// When the leap second flag is set, the last minute of the last hour
+// of the last day of that month has an extra second inserted
+//
+// This function returns 59 for most minutes, and 60 for leap minutes.
+//
+// Some documents indicate that leap seconds might occur a the end of any
+// month, while others indicate that they occur only in June and December.
+// Possibly this code should be revised to account for the possibility of
+// leap seconds in other months.
+uint8_t last_second(wwvb_t &t) {
+    if(!t.ls) return 59;
+    if(t.hour != 23) return 59;
+    if(t.minute != 59) return 59;
+    if(t.ly) {
+        if(t.yday == 182 || t.yday == 366) return 60;
+    } else {
+        if(t.yday == 181 || t.yday == 365) return 60;
+    }
+    return 59;
+}
+
+// Advance to exactly the beginning of the next minute
+void advance_minute(wwvb_t &t) {
+    // If the past minute ended with a leap second, reset the flag
+    if(last_second(t) == 60) t.ls = 0;
+
+    t.second = 0;
+    ++t.minute;
+    if(t.minute < 60) return;
+
+    // new hour
+    t.minute = 0;
+    ++t.hour;
+    if(t.hour < 24) return;
+
+    // new day
+    t.hour = 0;
+    ++t.yday;
+    if(t.yday <= last_yday(t)) return;
+
+    // new year
+    t.yday = 1;
+    t.year += 1;
+    t.ly = isly(t.year);
+}
+
+
+// Advance by exactly one second
+void advance_second(wwvb_t &t) {
+    ++t.second;
+    if(t.second <= last_second(t)) return;
+
+    t.second = 0;
+    advance_minute(t);
+}
+
+// Advance or decrease the time according to the timezone offset
+// in minutes and seconds.  Note: for negative non-hour offsets, h and m
+// should both be negative.  e.g., for instance the NST offset of -3:30
+// would be passed as h=-3, m=-30
+void apply_tz(wwvb_t &t, int8_t h, int8_t m) {
+    t.minute += m;
+    t.hour += h;
+    // Now, both hours and minutes can be outside their normal range
+
+    // Adjust minutes until they are again in the range [0..60)
+    if(m < 0) {
+        m += 60;
+        t.hour -= 1;
+    } else if(m > 60) {
+        m -= 60;
+        t.hour -= 1;
+    }
+    // Now minutes are in the range [0..60) but hours can be outside
+    // the range.
+    if(t.hour < 0) {
+        t.hour += 24;
+        t.yday -= 1;
+    } else if(t.hour > 24) {
+        t.hour -= 24;
+        t.yday += 1;
+    }
+    // Now, minutes and hours are in their normal range, but the year
+    // day can be outside the year.
+    // in practice, only one 'if' will run
+    if(t.yday <= 0) {
+        t.year--;
+        t.yday = last_yday(t) - t.yday;
+        t.ly = isly(t.year);
+    } else if(t.yday > last_yday(t)) {
+        t.yday -= last_yday(t);
+        t.year++;
+        t.ly = isly(t.year);
+    }
+
+    // Now
+}
+
+int8_t leapyears_before(int8_t year) {
+    return (year + 3) / 4;
+}
+
+// monday = 0, sunday = 6
+#define DOW_YDAY1_YEAR0 5  // january 1, 2000 = saturday
+int8_t get_dow(wwvb_t &t) {
+    int16_t dow = DOW_YDAY1_YEAR0;
+    dow += t.year;
+    dow += leapyears_before(t.year);
+    dow += t.yday-1;
+    return dow % 7;
+}
+
+bool operator==(const wwvb_t &a, const wwvb_t &b) {
+    return a.year == b.year && a.yday == b.yday
+        && a.hour == b.hour && a.minute == b.minute
+        && a.second == b.second
+        && a.dst == b.dst && a.ly == b.ly
+        && a.ls == b.ls;
+}
+
+const uint8_t NSAMPLES = 120;
+const int8_t DEBOUNCE_TC = 10;
+const int16_t COUNTER_SLOP = 100;
+// 10 for DEBOUNCE_TC, 30 for receiver rise/fall time, 5 for light propagation
+const int16_t SIGNAL_DELAY = 40;
+uint8_t wwvb_buf[(NSAMPLES+3)/4];
+int8_t wwvb_pos;
+
+enum wwvb_state_t { STATE_FIND_POLARITY, STATE_CAPTURE_TIME };
+
+wwvb_state_t wwvb_state;
+bool wwvb_polarity;
+
+int8_t wwvb_counter;
+bool wwvb_denoised;
+
+int16_t counter;
+int8_t sos_counter;
+
+void WWVB_PUT(uint8_t v) {
+    uint8_t idx = wwvb_pos / 4;
+    uint8_t s = 2 * (wwvb_pos % 4);
+    uint8_t m = 3 << s;
+    wwvb_buf[idx] = (wwvb_buf[idx] & ~m) | (v << s);
+    wwvb_pos ++;
+    if(wwvb_pos == NSAMPLES) wwvb_pos = 0;
+}
+
+uint8_t WWVB_GET(int8_t i) {
+    i = i - NSAMPLES + wwvb_pos;
+    if(i < 0) i += NSAMPLES;
+    uint8_t idx = i / 4;
+    uint8_t s = 2*(i % 4);
+    return (wwvb_buf[idx] >> s) & 3;
+}
+
+void decode_one_minute(uint8_t pos, wwvb_t &t) {
+    // The minute running from pos..pos+60 is already validated
+    // so there's no need to check mark bits or "always zero" bits
+    // .. everything from WWVB_GET is just a 0 or a 1
+#define G(p, w) (WWVB_GET((p)+pos) ? (w) : 0)
+    t.minute = G(1, 40) + G(2, 20) + G(3, 10)
+            + G(5, 8) + G(6, 4) + G(7, 2) + G(8, 1);
+    t.hour = G(12, 20) + G(13, 10)
+            + G(15, 8) + G(16, 4) + G(17, 2) + G(18, 1);
+    t.yday = G(22, 200) + G(23, 100)
+            + G(25, 80) + G(26, 40) + G(27, 20) + G(28, 10)
+            + G(30, 8) + G(31, 4) + G(32, 2) + G(33, 1);
+    t.year = G(45, 80) + G(46, 40) + G(47, 20) + G(48, 10)
+            + G(50, 8) + G(51, 4) + G(52, 2) + G(53, 1);
+    t.ly = G(55, 1);
+    t.ls = G(56, 1);
+    t.dst = G(57, 2) + G(58, 1);
+    t.second = 0;
+}
+
+void denoise_step(bool &denoised, int8_t &counter, bool value) {
+    if(value) {
+        if(0 && counter <= 0) counter = 1;
+        else if(counter == DEBOUNCE_TC) denoised = value;
+        else counter++;
+    } else {
+        if(0 && counter >= 0) counter = -1;
+        else if(counter == -DEBOUNCE_TC) denoised = value;
+        else counter--;
+    }
+}
+
+
+bool counter_near(int16_t n) {
+    return counter > (n - COUNTER_SLOP) && counter <= (n + COUNTER_SLOP);
+}
+
+const char *format_wwvbtime(const wwvb_t &t) {
+    static char buf[80];
+    snprintf(buf, sizeof(buf), "%4d/%03d %d:%02d:%02d ly=%d ls=%d dst=%d",
+        t.year + 2000, t.yday, t.hour, t.minute, t.second, t.ls, t.ly, t.dst);
+    return buf;
+}
+
+// bit i is 1 if it must be a mark, 0 if it must not be a mark
+const uint64_t markmask = 
+    (UINT64_C(1) <<  0) |
+    (UINT64_C(1) <<  9) |
+    (UINT64_C(1) << 19) |
+    (UINT64_C(1) << 29) |
+    (UINT64_C(1) << 39) |
+    (UINT64_C(1) << 49) |
+    (UINT64_C(1) << 59);
+
+#define MARK(i) do { if(WWVB_GET(i) != 2 || WWVB_GET(i+60) != 2) return false; } while(0)
+#define NOMARK(i) do { if(WWVB_GET(i) == 2 || WWVB_GET(i+60) == 2) return false; } while(0)
+bool try_set_time(wwvb_t &new_t) {
+    // Check for markers over 2 minutes
+    for(int i=0; i<60; i++) 
+        if(markmask & (UINT64_C(1) << i)) MARK(i); else NOMARK(i);
+    wwvb_t t0, t1;
+    decode_one_minute(0, t0);
+    decode_one_minute(60, t1);
+
+printf("first minute  %s\n", format_wwvbtime(t0));
+printf("second minute %s\n", format_wwvbtime(t1));
+    advance_minute(t0);
+printf("advanced      %s\n", format_wwvbtime(t0));
+    if(t0 == t1) {
+        t1.second = 59;
+        new_t = t1;
+        return true;
+    }
+    return false;
+}
+
+#ifdef TUNE
+/* TIMER1 runs at 16MHz nominal.  We want a 1ms interrupt.  
+ * That makes the nominal TOP value 16000.  This wide adjustment range allows
+ * us to accomodate real clock frequencies of 15MHz..16MHz.  The expected clock
+ * variations are actually on the order of ppm, not 6%.
+ */
+extern void set_timer_top(uint16_t top);
+const int16_t MIN_TOP=15000, MAX_TOP=17000, NOMINAL_TOP=16000;
+int16_t top = NOMINAL_TOP;
+static uint8_t counter_history;
+void steer_counter(uint16_t pulse_period_measured) {
+    counter_history <<= 2;
+    if(measured < 1000) counter_history |= 1;
+    else if(measured > 1000) counter_history |= 2;
+    if(counter_history == 0x55 && top > min_top)
+        top--; /* Last 4 samples were all too short */
+    else if(counter_history == 0x88 && top < max_top)
+        top++; /* Last 4 samples were all too long */
+    set_timer_top(top);
+}
+
+#endif
+
+bool pending_set_time;
+bool pps_good;
+wwvb_t pending_time;
+int16_t free_running_ms;
+}
+
+void wwvb_receive_loop(bool raw_wwvb) {
+    bool old_wwvb_denoised = wwvb_denoised;
+    denoise_step(wwvb_denoised, wwvb_counter, raw_wwvb);
+
+    bool edge = wwvb_denoised ^ old_wwvb_denoised;
+    bool wwvb = wwvb_denoised ^ wwvb_polarity;
+    bool rising_edge = edge && wwvb;
+    bool falling_edge = edge && !wwvb;
+
+    switch(wwvb_state) {
+    case STATE_FIND_POLARITY:
+        if(rising_edge) {
+            if(counter_near(1000)) {
+                sos_counter++;
+                if(sos_counter == 5) {
+                    goto set_state_capture_time;
+                }
+            } else { sos_counter = 0; wwvb_polarity = !wwvb_polarity; }
+        }
+
+    case STATE_CAPTURE_TIME:
+        if(rising_edge) {
+            if(!counter_near(1000)) {
+                goto set_state_find_polarity;
+            }
+            if(pending_set_time) {
+                set_time(pending_time);
+                pending_set_time = false;
+                free_running_ms = 1000 + SIGNAL_DELAY;
+            }
+        }
+        if(falling_edge) {
+            if(counter_near(200)) WWVB_PUT(0);
+            else if(counter_near(500)) WWVB_PUT(1);
+            else if(counter_near(800)) {
+                WWVB_PUT(2);
+                pending_set_time = try_set_time(pending_time);
+            } else
+                goto set_state_find_polarity;
+        }
+        static uint8_t seconds_unset;
+        seconds_unset ++;
+        if(seconds_unset == 0) goto set_state_find_polarity;
+    
+    }
+
+    free_running_ms ++; 
+    if(free_running_ms >= 1000) {
+        free_running_ms -= 1000;
+        next_second();
+    }
+
+    if(rising_edge) {
+        pps_good = counter_near(1000);
+#ifdef TUNE
+        if(pps_good && counter != 1000) steer_counter(pps_good > 1000);
+#endif
+        counter = 0;
+    } else if(counter > 1000 + COUNTER_SLOP) {
+        pps_good = false;
+        counter ++;
+    } else
+        counter ++;
+
+    return;
+
+set_state_capture_time:
+    counter = 0;
+    memset(wwvb_buf, 0, sizeof(wwvb_buf));
+    wwvb_state = STATE_CAPTURE_TIME;
+    return;
+
+set_state_find_polarity:
+    sos_counter = 0;
+    wwvb_state = STATE_FIND_POLARITY;
+    return;
+}
+
+#ifndef AVR
+#include <stdio.h>
+#include <stdlib.h>
+
+void set_time(const wwvb_t &t) {
+    printf("set time %d/%03d %d:%02d:%02d ly=%d ls=%d dst=%d\n",
+        t.year + 2000, t.yday, t.hour, t.minute, t.second, t.ls, t.ly, t.dst);
+    exit(0);
+}
+
+void next_second() {}
+
+int main() {
+    while(1) {
+        int c = getchar();
+        if(c == EOF) break;
+        wwvb_receive_loop(c == '1');
+    }
+    printf("failed to set time\n");
+}
+#endif
