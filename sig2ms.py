@@ -9,6 +9,7 @@ def noise_one(c):
     return c
 
 def noise(s):
+    return s
     return "".join(noise_one(c) for c in s)
 
 wf = {}
