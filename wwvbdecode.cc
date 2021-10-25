@@ -227,7 +227,7 @@ const char *format_wwvbtime(const wwvb_t &t) {
 }
 
 // bit i is 1 if it must be a mark, 0 if it must not be a mark
-const uint64_t markmask = 
+const uint64_t markmask =
     (UINT64_C(1) <<  0) |
     (UINT64_C(1) <<  9) |
     (UINT64_C(1) << 19) |
@@ -240,7 +240,7 @@ const uint64_t markmask =
 #define NOMARK(i) do { if(WWVB_GET(i) == 2 || WWVB_GET(i+60) == 2) return false; } while(0)
 bool try_set_time(wwvb_t &new_t) {
     // Check for markers over 2 minutes
-    for(int i=0; i<60; i++) 
+    for(int i=0; i<60; i++)
         if(markmask & (UINT64_C(1) << i)) MARK(i); else NOMARK(i);
     wwvb_t t0, t1;
     decode_one_minute(0, t0);
@@ -259,7 +259,7 @@ printf("advanced      %s\n", format_wwvbtime(t0));
 }
 
 #ifdef TUNE
-/* TIMER1 runs at 16MHz nominal.  We want a 1ms interrupt.  
+/* TIMER1 runs at 16MHz nominal.  We want a 1ms interrupt.
  * That makes the nominal TOP value 16000.  This wide adjustment range allows
  * us to accomodate real clock frequencies of 15MHz..16MHz.  The expected clock
  * variations are actually on the order of ppm, not 6%.
@@ -330,10 +330,10 @@ void wwvb_receive_loop(bool raw_wwvb) {
         static uint8_t seconds_unset;
         seconds_unset ++;
         if(seconds_unset == 0) goto set_state_find_polarity;
-    
+
     }
 
-    free_running_ms ++; 
+    free_running_ms ++;
     if(free_running_ms >= 1000) {
         free_running_ms -= 1000;
         next_second();
