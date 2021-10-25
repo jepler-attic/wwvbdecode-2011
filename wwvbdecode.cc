@@ -573,9 +573,9 @@ ISR(TIMER1_CAPT_vect) {
     int val;
 
     if(wwvb_state == STATE_FIND_POLARITY) {
-        val = pps_good;
+        val = wwvb_raw ? 1 : 2 * pps_good;
     } else {
-        val = (wwvb_denoised ^ wwvb_polarity ) ? 1 : 16;
+        val = (wwvb_denoised ^ wwvb_polarity ) ? 16 : 1;
     }
     if((free_running_ms & 15) < val)
         PORTB |= (1<<LED);
