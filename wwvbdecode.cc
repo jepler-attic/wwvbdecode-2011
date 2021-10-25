@@ -221,8 +221,9 @@ bool operator==(const wwvb_t &a, const wwvb_t &b) {
 const uint8_t NSAMPLES = 120;
 const int8_t DEBOUNCE_TC = 10;
 const int16_t COUNTER_SLOP = 100;
-// 10 for DEBOUNCE_TC, 30 for receiver rise/fall time, 5 for light propagation
-const int16_t SIGNAL_DELAY = 40;
+const int16_t RECEIVER_DELAY = 40;
+const int16_t LIGHT_DELAY = 5;
+const int16_t SIGNAL_DELAY = RECEIVER_DELAY + 2*DEBOUNCE_TC + LIGHT_DELAY;
 uint8_t wwvb_buf[(NSAMPLES+3)/4];
 int8_t wwvb_pos;
 
