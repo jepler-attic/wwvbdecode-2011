@@ -373,7 +373,7 @@ void steer_timer(wwvb_t &pending_time)
     uint32_t real_elapsed = 1000 * (daysec(pending_time) + 86400 - daysec(last_steer_time));
 
     // Don't steer if it's less than 22 hours
-    if(real_elapsed < (22 * 60 * 60 * 1000)) return;
+    if(real_elapsed < (UINT32_C(22) * 60 * 60 * 1000)) return;
 
     uint32_t counted_elapsed = ticks - last_steer_ticks;
 
