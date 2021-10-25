@@ -277,7 +277,7 @@ bool counter_near(int16_t n) {
 
 const char *format_wwvbtime(const wwvb_t &t) {
     static char buf[80];
-    snprintf(buf, sizeof(buf), "%4d/%03d %d:%02d:%02d ly=%d ls=%d dst=%d",
+    snprintf(buf, sizeof(buf), "%4d/%03d %2d:%02d:%02d ly=%d ls=%d dst=%d",
         t.year + 2000, t.yday, t.hour, t.minute, t.second, t.ls, t.ly, t.dst);
     return buf;
 }
@@ -534,7 +534,7 @@ int uptime;
 char buf[80];
 void set_time(const wwvb_t &t) {
     snprintf(buf, sizeof(buf),
-        "set time %d/%03d %d:%02d:%02d ly=%d ls=%d dst=%d uptime=%d pol=%d\n",
+        "set time %d/%03d %2d:%02d:%02d ly=%d ls=%d dst=%d uptime=%d pol=%d\n",
         t.year + 2000, t.yday, t.hour, t.minute, t.second, t.ls, t.ly, t.dst,
         uptime, wwvb_polarity);
     eeprom_write_block(buf, 0, strlen(buf)+1);
